@@ -7,8 +7,8 @@ import Foundation
 // Depending on the consumer's build setup, the low-level FFI code
 // might be in a separate module, or it might be compiled inline into
 // this module. This is a bit of light hackery to work with both.
-#if canImport(BitwardenExportersFFI)
-import BitwardenExportersFFI
+#if canImport(BitwardenRandomFFI)
+import BitwardenRandomFFI
 #endif
 
 fileprivate extension RustBuffer {
@@ -25,13 +25,13 @@ fileprivate extension RustBuffer {
     }
 
     static func from(_ ptr: UnsafeBufferPointer<UInt8>) -> RustBuffer {
-        try! rustCall { ffi_bitwarden_exporters_rustbuffer_from_bytes(ForeignBytes(bufferPointer: ptr), $0) }
+        try! rustCall { ffi_bitwarden_random_rustbuffer_from_bytes(ForeignBytes(bufferPointer: ptr), $0) }
     }
 
     // Frees the buffer in place.
     // The buffer must not be used after this is called.
     func deallocate() {
-        try! rustCall { ffi_bitwarden_exporters_rustbuffer_free(self, $0) }
+        try! rustCall { ffi_bitwarden_random_rustbuffer_free(self, $0) }
     }
 }
 
@@ -281,7 +281,7 @@ private func makeRustCall<T, E: Swift.Error>(
     _ callback: (UnsafeMutablePointer<RustCallStatus>) -> T,
     errorHandler: ((RustBuffer) throws -> E)?
 ) throws -> T {
-    uniffiEnsureBitwardenExportersInitialized()
+    uniffiEnsureBitwardenRandomInitialized()
     var callStatus = RustCallStatus.init()
     let returnedVal = callback(&callStatus)
     try uniffiCheckCallStatus(callStatus: callStatus, errorHandler: errorHandler)
@@ -419,6 +419,22 @@ fileprivate final class UniffiHandleMap<T>: @unchecked Sendable {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
+    typealias FfiType = UInt32
+    typealias SwiftType = UInt32
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt32 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterString: FfiConverter {
     typealias SwiftType = String
     typealias FfiType = RustBuffer
@@ -457,51 +473,191 @@ fileprivate struct FfiConverterString: FfiConverter {
     }
 }
 
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterData: FfiConverterRustBuffer {
+    typealias SwiftType = Data
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Data {
+        let len: Int32 = try readInt(&buf)
+        return Data(try readBytes(&buf, count: Int(len)))
+    }
+
+    public static func write(_ value: Data, into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        writeBytes(&buf, value)
+    }
+}
+
+
+
 
 /**
- * Temporary struct to hold metadata related to current account
- *
- * Eventually the SDK itself should have this state and we get rid of this struct.
+ * Client exposing random-number generation to cross-platform bindings.
  */
-public struct Account: Equatable, Hashable {
-    public let id: Uuid
-    public let email: String
-    public let name: String?
+public protocol SdkRandomNumberClientProtocol: AnyObject, Sendable {
 
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(id: Uuid, email: String, name: String?) {
-        self.id = id
-        self.email = email
-        self.name = name
+    /**
+     * Generate `len` cryptographically-secure random bytes.
+     *
+     * Returns [`GenBytesError::TooManyBytes`] if `len` exceeds 1 KiB. If you want over 1KiB of
+     * randomness, please reconsider your design.
+     */
+    func genBytes(len: UInt32) throws  -> Data
+
+    /**
+     * Generate a cryptographically-secure random number in the range `[min, max]` (inclusive).
+     *
+     * Returns [`GenRangeError::InvalidRange`] if `min > max`.
+     */
+    func genRange(min: UInt32, max: UInt32) throws  -> UInt32
+
+    /**
+     * Generate a random v4 UUID, sampled from a CRNG
+     *
+     * This has 122 random bits of entropy.
+     */
+    func genUuid()  -> String
+
+}
+/**
+ * Client exposing random-number generation to cross-platform bindings.
+ */
+open class SdkRandomNumberClient: SdkRandomNumberClientProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_bitwarden_random_fn_clone_sdkrandomnumberclient(self.handle, $0) }
+    }
+    /**
+     * Construct a new client.
+     */
+public convenience init() {
+    let handle =
+        try! rustCall() {
+    uniffi_bitwarden_random_fn_constructor_sdkrandomnumberclient_new($0
+    )
+}
+    self.init(unsafeFromHandle: handle)
+}
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_bitwarden_random_fn_free_sdkrandomnumberclient(handle, $0) }
     }
 
 
 
 
+    /**
+     * Generate `len` cryptographically-secure random bytes.
+     *
+     * Returns [`GenBytesError::TooManyBytes`] if `len` exceeds 1 KiB. If you want over 1KiB of
+     * randomness, please reconsider your design.
+     */
+open func genBytes(len: UInt32)throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeGenBytesError_lift) {
+    uniffi_bitwarden_random_fn_method_sdkrandomnumberclient_gen_bytes(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt32.lower(len),$0
+    )
+})
 }
 
-#if compiler(>=6)
-extension Account: Sendable {}
-#endif
+    /**
+     * Generate a cryptographically-secure random number in the range `[min, max]` (inclusive).
+     *
+     * Returns [`GenRangeError::InvalidRange`] if `min > max`.
+     */
+open func genRange(min: UInt32, max: UInt32)throws  -> UInt32  {
+    return try  FfiConverterUInt32.lift(try rustCallWithError(FfiConverterTypeGenRangeError_lift) {
+    uniffi_bitwarden_random_fn_method_sdkrandomnumberclient_gen_range(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt32.lower(min),
+        FfiConverterUInt32.lower(max),$0
+    )
+})
+}
+
+    /**
+     * Generate a random v4 UUID, sampled from a CRNG
+     *
+     * This has 122 random bits of entropy.
+     */
+open func genUuid() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_bitwarden_random_fn_method_sdkrandomnumberclient_gen_uuid(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+
+
+}
+
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypeAccount: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Account {
-        return
-            try Account(
-                id: FfiConverterTypeUuid.read(from: &buf),
-                email: FfiConverterString.read(from: &buf),
-                name: FfiConverterOptionString.read(from: &buf)
-        )
+public struct FfiConverterTypeSdkRandomNumberClient: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = SdkRandomNumberClient
+
+    public static func lift(_ handle: UInt64) throws -> SdkRandomNumberClient {
+        return SdkRandomNumberClient(unsafeFromHandle: handle)
     }
 
-    public static func write(_ value: Account, into buf: inout [UInt8]) {
-        FfiConverterTypeUuid.write(value.id, into: &buf)
-        FfiConverterString.write(value.email, into: &buf)
-        FfiConverterOptionString.write(value.name, into: &buf)
+    public static func lower(_ value: SdkRandomNumberClient) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SdkRandomNumberClient {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: SdkRandomNumberClient, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
     }
 }
 
@@ -509,37 +665,31 @@ public struct FfiConverterTypeAccount: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeAccount_lift(_ buf: RustBuffer) throws -> Account {
-    return try FfiConverterTypeAccount.lift(buf)
+public func FfiConverterTypeSdkRandomNumberClient_lift(_ handle: UInt64) throws -> SdkRandomNumberClient {
+    return try FfiConverterTypeSdkRandomNumberClient.lift(handle)
 }
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeAccount_lower(_ value: Account) -> RustBuffer {
-    return FfiConverterTypeAccount.lower(value)
+public func FfiConverterTypeSdkRandomNumberClient_lower(_ value: SdkRandomNumberClient) -> UInt64 {
+    return FfiConverterTypeSdkRandomNumberClient.lower(value)
 }
 
 
-public enum ExportError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+
+/**
+ * Error returned by [`SdkRandomNumberClient::gen_bytes`].
+ */
+public enum GenBytesError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
 
 
 
-    case MissingField(message: String)
-
-    case NotAuthenticated(message: String)
-
-    case Csv(message: String)
-
-    case Cxf(message: String)
-
-    case Json(message: String)
-
-    case EncryptedJson(message: String)
-
-    case BitwardenCrypto(message: String)
-
-    case Cipher(message: String)
+    /**
+     * More than 1 KiB of randomness was requested.
+     */
+    case TooManyBytes(message: String)
 
 
 
@@ -554,51 +704,23 @@ public enum ExportError: Swift.Error, Equatable, Hashable, Foundation.LocalizedE
 }
 
 #if compiler(>=6)
-extension ExportError: Sendable {}
+extension GenBytesError: Sendable {}
 #endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypeExportError: FfiConverterRustBuffer {
-    typealias SwiftType = ExportError
+public struct FfiConverterTypeGenBytesError: FfiConverterRustBuffer {
+    typealias SwiftType = GenBytesError
 
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ExportError {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GenBytesError {
         let variant: Int32 = try readInt(&buf)
         switch variant {
 
 
 
 
-        case 1: return .MissingField(
-            message: try FfiConverterString.read(from: &buf)
-        )
-
-        case 2: return .NotAuthenticated(
-            message: try FfiConverterString.read(from: &buf)
-        )
-
-        case 3: return .Csv(
-            message: try FfiConverterString.read(from: &buf)
-        )
-
-        case 4: return .Cxf(
-            message: try FfiConverterString.read(from: &buf)
-        )
-
-        case 5: return .Json(
-            message: try FfiConverterString.read(from: &buf)
-        )
-
-        case 6: return .EncryptedJson(
-            message: try FfiConverterString.read(from: &buf)
-        )
-
-        case 7: return .BitwardenCrypto(
-            message: try FfiConverterString.read(from: &buf)
-        )
-
-        case 8: return .Cipher(
+        case 1: return .TooManyBytes(
             message: try FfiConverterString.read(from: &buf)
         )
 
@@ -607,28 +729,14 @@ public struct FfiConverterTypeExportError: FfiConverterRustBuffer {
         }
     }
 
-    public static func write(_ value: ExportError, into buf: inout [UInt8]) {
+    public static func write(_ value: GenBytesError, into buf: inout [UInt8]) {
         switch value {
 
 
 
 
-        case .MissingField(_ /* message is ignored*/):
+        case .TooManyBytes(_ /* message is ignored*/):
             writeInt(&buf, Int32(1))
-        case .NotAuthenticated(_ /* message is ignored*/):
-            writeInt(&buf, Int32(2))
-        case .Csv(_ /* message is ignored*/):
-            writeInt(&buf, Int32(3))
-        case .Cxf(_ /* message is ignored*/):
-            writeInt(&buf, Int32(4))
-        case .Json(_ /* message is ignored*/):
-            writeInt(&buf, Int32(5))
-        case .EncryptedJson(_ /* message is ignored*/):
-            writeInt(&buf, Int32(6))
-        case .BitwardenCrypto(_ /* message is ignored*/):
-            writeInt(&buf, Int32(7))
-        case .Cipher(_ /* message is ignored*/):
-            writeInt(&buf, Int32(8))
 
 
         }
@@ -639,74 +747,78 @@ public struct FfiConverterTypeExportError: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeExportError_lift(_ buf: RustBuffer) throws -> ExportError {
-    return try FfiConverterTypeExportError.lift(buf)
+public func FfiConverterTypeGenBytesError_lift(_ buf: RustBuffer) throws -> GenBytesError {
+    return try FfiConverterTypeGenBytesError.lift(buf)
 }
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeExportError_lower(_ value: ExportError) -> RustBuffer {
-    return FfiConverterTypeExportError.lower(value)
+public func FfiConverterTypeGenBytesError_lower(_ value: GenBytesError) -> RustBuffer {
+    return FfiConverterTypeGenBytesError.lower(value)
 }
 
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
-public enum ExportFormat: Equatable, Hashable {
-
-    case csv
-    case json
-    case encryptedJson(password: String
-    )
+/**
+ * Error returned by [`SdkRandomNumberClient::gen_range`].
+ */
+public enum GenRangeError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
 
 
 
+    /**
+     * `min` was greater than `max`, so the range is empty.
+     */
+    case InvalidRange(message: String)
 
+
+
+
+
+
+
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
 
 }
 
 #if compiler(>=6)
-extension ExportFormat: Sendable {}
+extension GenRangeError: Sendable {}
 #endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypeExportFormat: FfiConverterRustBuffer {
-    typealias SwiftType = ExportFormat
+public struct FfiConverterTypeGenRangeError: FfiConverterRustBuffer {
+    typealias SwiftType = GenRangeError
 
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ExportFormat {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GenRangeError {
         let variant: Int32 = try readInt(&buf)
         switch variant {
 
-        case 1: return .csv
 
-        case 2: return .json
 
-        case 3: return .encryptedJson(password: try FfiConverterString.read(from: &buf)
+
+        case 1: return .InvalidRange(
+            message: try FfiConverterString.read(from: &buf)
         )
+
 
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
-    public static func write(_ value: ExportFormat, into buf: inout [UInt8]) {
+    public static func write(_ value: GenRangeError, into buf: inout [UInt8]) {
         switch value {
 
 
-        case .csv:
+
+
+        case .InvalidRange(_ /* message is ignored*/):
             writeInt(&buf, Int32(1))
 
 
-        case .json:
-            writeInt(&buf, Int32(2))
-
-
-        case let .encryptedJson(password):
-            writeInt(&buf, Int32(3))
-            FfiConverterString.write(password, into: &buf)
-
         }
     }
 }
@@ -715,40 +827,15 @@ public struct FfiConverterTypeExportFormat: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeExportFormat_lift(_ buf: RustBuffer) throws -> ExportFormat {
-    return try FfiConverterTypeExportFormat.lift(buf)
+public func FfiConverterTypeGenRangeError_lift(_ buf: RustBuffer) throws -> GenRangeError {
+    return try FfiConverterTypeGenRangeError.lift(buf)
 }
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeExportFormat_lower(_ value: ExportFormat) -> RustBuffer {
-    return FfiConverterTypeExportFormat.lower(value)
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
-    typealias SwiftType = String?
-
-    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
-        guard let value = value else {
-            writeInt(&buf, Int8(0))
-            return
-        }
-        writeInt(&buf, Int8(1))
-        FfiConverterString.write(value, into: &buf)
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
-        switch try readInt(&buf) as Int8 {
-        case 0: return nil
-        case 1: return try FfiConverterString.read(from: &buf)
-        default: throw UniffiInternalError.unexpectedOptionalTag
-        }
-    }
+public func FfiConverterTypeGenRangeError_lower(_ value: GenRangeError) -> RustBuffer {
+    return FfiConverterTypeGenRangeError.lower(value)
 }
 
 private enum InitializationResult {
@@ -762,18 +849,29 @@ private let initializationResult: InitializationResult = {
     // Get the bindings contract version from our ComponentInterface
     let bindings_contract_version = 30
     // Get the scaffolding contract version by calling the into the dylib
-    let scaffolding_contract_version = ffi_bitwarden_exporters_uniffi_contract_version()
+    let scaffolding_contract_version = ffi_bitwarden_random_uniffi_contract_version()
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
+    if (uniffi_bitwarden_random_checksum_method_sdkrandomnumberclient_gen_bytes() != 13359) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_bitwarden_random_checksum_method_sdkrandomnumberclient_gen_range() != 23535) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_bitwarden_random_checksum_method_sdkrandomnumberclient_gen_uuid() != 32374) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_bitwarden_random_checksum_constructor_sdkrandomnumberclient_new() != 21626) {
+        return InitializationResult.apiChecksumMismatch
+    }
 
-    uniffiEnsureBitwardenCoreInitialized()
     return InitializationResult.ok
 }()
 
 // Make the ensure init function public so that other modules which have external type references to
 // our types can call it.
-public func uniffiEnsureBitwardenExportersInitialized() {
+public func uniffiEnsureBitwardenRandomInitialized() {
     switch initializationResult {
     case .ok:
         break

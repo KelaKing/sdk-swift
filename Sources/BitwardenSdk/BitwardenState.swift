@@ -7,8 +7,8 @@ import Foundation
 // Depending on the consumer's build setup, the low-level FFI code
 // might be in a separate module, or it might be compiled inline into
 // this module. This is a bit of light hackery to work with both.
-#if canImport(BitwardenExportersFFI)
-import BitwardenExportersFFI
+#if canImport(BitwardenStateFFI)
+import BitwardenStateFFI
 #endif
 
 fileprivate extension RustBuffer {
@@ -25,13 +25,13 @@ fileprivate extension RustBuffer {
     }
 
     static func from(_ ptr: UnsafeBufferPointer<UInt8>) -> RustBuffer {
-        try! rustCall { ffi_bitwarden_exporters_rustbuffer_from_bytes(ForeignBytes(bufferPointer: ptr), $0) }
+        try! rustCall { ffi_bitwarden_state_rustbuffer_from_bytes(ForeignBytes(bufferPointer: ptr), $0) }
     }
 
     // Frees the buffer in place.
     // The buffer must not be used after this is called.
     func deallocate() {
-        try! rustCall { ffi_bitwarden_exporters_rustbuffer_free(self, $0) }
+        try! rustCall { ffi_bitwarden_state_rustbuffer_free(self, $0) }
     }
 }
 
@@ -281,7 +281,7 @@ private func makeRustCall<T, E: Swift.Error>(
     _ callback: (UnsafeMutablePointer<RustCallStatus>) -> T,
     errorHandler: ((RustBuffer) throws -> E)?
 ) throws -> T {
-    uniffiEnsureBitwardenExportersInitialized()
+    uniffiEnsureBitwardenStateInitialized()
     var callStatus = RustCallStatus.init()
     let returnedVal = callback(&callStatus)
     try uniffiCheckCallStatus(callStatus: callStatus, errorHandler: errorHandler)
@@ -459,87 +459,42 @@ fileprivate struct FfiConverterString: FfiConverter {
 
 
 /**
- * Temporary struct to hold metadata related to current account
- *
- * Eventually the SDK itself should have this state and we get rid of this struct.
+ * Errors that can occur when interacting with the SDK-managed database.
  */
-public struct Account: Equatable, Hashable {
-    public let id: Uuid
-    public let email: String
-    public let name: String?
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(id: Uuid, email: String, name: String?) {
-        self.id = id
-        self.email = email
-        self.name = name
-    }
+public enum DatabaseError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
 
 
 
+    /**
+     * The requested database configuration is not supported on the current platform.
+     */
+    case UnsupportedConfiguration(message: String)
 
-}
+    /**
+     * A call dispatched through the thread-bound runner failed.
+     */
+    case ThreadBoundRunner(message: String)
 
-#if compiler(>=6)
-extension Account: Sendable {}
-#endif
+    /**
+     * Failed to serialize or deserialize a stored value.
+     */
+    case Serialization(message: String)
 
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeAccount: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Account {
-        return
-            try Account(
-                id: FfiConverterTypeUuid.read(from: &buf),
-                email: FfiConverterString.read(from: &buf),
-                name: FfiConverterOptionString.read(from: &buf)
-        )
-    }
+    /**
+     * A JavaScript error was raised by the IndexedDB backend.
+     */
+    case Js(message: String)
 
-    public static func write(_ value: Account, into buf: inout [UInt8]) {
-        FfiConverterTypeUuid.write(value.id, into: &buf)
-        FfiConverterString.write(value.email, into: &buf)
-        FfiConverterOptionString.write(value.name, into: &buf)
-    }
-}
+    /**
+     * An unexpected internal error occurred in the database backend.
+     */
+    case Internal(message: String)
 
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeAccount_lift(_ buf: RustBuffer) throws -> Account {
-    return try FfiConverterTypeAccount.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeAccount_lower(_ value: Account) -> RustBuffer {
-    return FfiConverterTypeAccount.lower(value)
-}
-
-
-public enum ExportError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
-
-
-
-    case MissingField(message: String)
-
-    case NotAuthenticated(message: String)
-
-    case Csv(message: String)
-
-    case Cxf(message: String)
-
-    case Json(message: String)
-
-    case EncryptedJson(message: String)
-
-    case BitwardenCrypto(message: String)
-
-    case Cipher(message: String)
+    /**
+     * The database has been closed (e.g. by [`crate::registry::StateRegistry::wipe`]) and
+     * can no longer service operations.
+     */
+    case Closed(message: String)
 
 
 
@@ -554,51 +509,43 @@ public enum ExportError: Swift.Error, Equatable, Hashable, Foundation.LocalizedE
 }
 
 #if compiler(>=6)
-extension ExportError: Sendable {}
+extension DatabaseError: Sendable {}
 #endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypeExportError: FfiConverterRustBuffer {
-    typealias SwiftType = ExportError
+public struct FfiConverterTypeDatabaseError: FfiConverterRustBuffer {
+    typealias SwiftType = DatabaseError
 
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ExportError {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DatabaseError {
         let variant: Int32 = try readInt(&buf)
         switch variant {
 
 
 
 
-        case 1: return .MissingField(
+        case 1: return .UnsupportedConfiguration(
             message: try FfiConverterString.read(from: &buf)
         )
 
-        case 2: return .NotAuthenticated(
+        case 2: return .ThreadBoundRunner(
             message: try FfiConverterString.read(from: &buf)
         )
 
-        case 3: return .Csv(
+        case 3: return .Serialization(
             message: try FfiConverterString.read(from: &buf)
         )
 
-        case 4: return .Cxf(
+        case 4: return .Js(
             message: try FfiConverterString.read(from: &buf)
         )
 
-        case 5: return .Json(
+        case 5: return .Internal(
             message: try FfiConverterString.read(from: &buf)
         )
 
-        case 6: return .EncryptedJson(
-            message: try FfiConverterString.read(from: &buf)
-        )
-
-        case 7: return .BitwardenCrypto(
-            message: try FfiConverterString.read(from: &buf)
-        )
-
-        case 8: return .Cipher(
+        case 6: return .Closed(
             message: try FfiConverterString.read(from: &buf)
         )
 
@@ -607,28 +554,24 @@ public struct FfiConverterTypeExportError: FfiConverterRustBuffer {
         }
     }
 
-    public static func write(_ value: ExportError, into buf: inout [UInt8]) {
+    public static func write(_ value: DatabaseError, into buf: inout [UInt8]) {
         switch value {
 
 
 
 
-        case .MissingField(_ /* message is ignored*/):
+        case .UnsupportedConfiguration(_ /* message is ignored*/):
             writeInt(&buf, Int32(1))
-        case .NotAuthenticated(_ /* message is ignored*/):
+        case .ThreadBoundRunner(_ /* message is ignored*/):
             writeInt(&buf, Int32(2))
-        case .Csv(_ /* message is ignored*/):
+        case .Serialization(_ /* message is ignored*/):
             writeInt(&buf, Int32(3))
-        case .Cxf(_ /* message is ignored*/):
+        case .Js(_ /* message is ignored*/):
             writeInt(&buf, Int32(4))
-        case .Json(_ /* message is ignored*/):
+        case .Internal(_ /* message is ignored*/):
             writeInt(&buf, Int32(5))
-        case .EncryptedJson(_ /* message is ignored*/):
+        case .Closed(_ /* message is ignored*/):
             writeInt(&buf, Int32(6))
-        case .BitwardenCrypto(_ /* message is ignored*/):
-            writeInt(&buf, Int32(7))
-        case .Cipher(_ /* message is ignored*/):
-            writeInt(&buf, Int32(8))
 
 
         }
@@ -639,74 +582,80 @@ public struct FfiConverterTypeExportError: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeExportError_lift(_ buf: RustBuffer) throws -> ExportError {
-    return try FfiConverterTypeExportError.lift(buf)
+public func FfiConverterTypeDatabaseError_lift(_ buf: RustBuffer) throws -> DatabaseError {
+    return try FfiConverterTypeDatabaseError.lift(buf)
 }
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeExportError_lower(_ value: ExportError) -> RustBuffer {
-    return FfiConverterTypeExportError.lower(value)
+public func FfiConverterTypeDatabaseError_lower(_ value: DatabaseError) -> RustBuffer {
+    return FfiConverterTypeDatabaseError.lower(value)
 }
 
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
-public enum ExportFormat: Equatable, Hashable {
-
-    case csv
-    case json
-    case encryptedJson(password: String
-    )
+public enum StateRegistryError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
 
 
 
+    case DatabaseNotInitialized(message: String)
 
+    case Database(message: String)
+
+
+
+
+
+
+
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
 
 }
 
 #if compiler(>=6)
-extension ExportFormat: Sendable {}
+extension StateRegistryError: Sendable {}
 #endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypeExportFormat: FfiConverterRustBuffer {
-    typealias SwiftType = ExportFormat
+public struct FfiConverterTypeStateRegistryError: FfiConverterRustBuffer {
+    typealias SwiftType = StateRegistryError
 
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ExportFormat {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> StateRegistryError {
         let variant: Int32 = try readInt(&buf)
         switch variant {
 
-        case 1: return .csv
 
-        case 2: return .json
 
-        case 3: return .encryptedJson(password: try FfiConverterString.read(from: &buf)
+
+        case 1: return .DatabaseNotInitialized(
+            message: try FfiConverterString.read(from: &buf)
         )
+
+        case 2: return .Database(
+            message: try FfiConverterString.read(from: &buf)
+        )
+
 
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
-    public static func write(_ value: ExportFormat, into buf: inout [UInt8]) {
+    public static func write(_ value: StateRegistryError, into buf: inout [UInt8]) {
         switch value {
 
 
-        case .csv:
+
+
+        case .DatabaseNotInitialized(_ /* message is ignored*/):
             writeInt(&buf, Int32(1))
-
-
-        case .json:
+        case .Database(_ /* message is ignored*/):
             writeInt(&buf, Int32(2))
 
 
-        case let .encryptedJson(password):
-            writeInt(&buf, Int32(3))
-            FfiConverterString.write(password, into: &buf)
-
         }
     }
 }
@@ -715,40 +664,15 @@ public struct FfiConverterTypeExportFormat: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeExportFormat_lift(_ buf: RustBuffer) throws -> ExportFormat {
-    return try FfiConverterTypeExportFormat.lift(buf)
+public func FfiConverterTypeStateRegistryError_lift(_ buf: RustBuffer) throws -> StateRegistryError {
+    return try FfiConverterTypeStateRegistryError.lift(buf)
 }
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeExportFormat_lower(_ value: ExportFormat) -> RustBuffer {
-    return FfiConverterTypeExportFormat.lower(value)
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
-    typealias SwiftType = String?
-
-    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
-        guard let value = value else {
-            writeInt(&buf, Int8(0))
-            return
-        }
-        writeInt(&buf, Int8(1))
-        FfiConverterString.write(value, into: &buf)
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
-        switch try readInt(&buf) as Int8 {
-        case 0: return nil
-        case 1: return try FfiConverterString.read(from: &buf)
-        default: throw UniffiInternalError.unexpectedOptionalTag
-        }
-    }
+public func FfiConverterTypeStateRegistryError_lower(_ value: StateRegistryError) -> RustBuffer {
+    return FfiConverterTypeStateRegistryError.lower(value)
 }
 
 private enum InitializationResult {
@@ -762,18 +686,17 @@ private let initializationResult: InitializationResult = {
     // Get the bindings contract version from our ComponentInterface
     let bindings_contract_version = 30
     // Get the scaffolding contract version by calling the into the dylib
-    let scaffolding_contract_version = ffi_bitwarden_exporters_uniffi_contract_version()
+    let scaffolding_contract_version = ffi_bitwarden_state_uniffi_contract_version()
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
 
-    uniffiEnsureBitwardenCoreInitialized()
     return InitializationResult.ok
 }()
 
 // Make the ensure init function public so that other modules which have external type references to
 // our types can call it.
-public func uniffiEnsureBitwardenExportersInitialized() {
+public func uniffiEnsureBitwardenStateInitialized() {
     switch initializationResult {
     case .ok:
         break
